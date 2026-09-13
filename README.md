@@ -1,12 +1,12 @@
 # Responsive thumbnails with tenant lifecycle controls
 
-The decision in this example is simple: image work may begin only after a tenant has completed onboarding and while its account is active. Infrai supplies the image processing boundary through one API and one `INFRAI_API_KEY`, so the service can replace a local Sharp worker or an Imgix URL-building layer without making tenant state somebody else's concern.
+We run a storefront platform where each merchant is a tenant. The rule we enforce: product image thumbnails get generated only after the merchant finishes onboarding and while the account is active. Infrai gives us that image processing boundary through one API and one `INFRAI_API_KEY`, so we can drop a local Sharp worker or an Imgix URL builder without pushing tenant state into someone else's system.
 
-The runnable path is deliberately narrow. A caller onboards a tenant, submits an uploaded image URL with a stable upload ID, and receives three stored WebP results at 16:9; an administrator can suspend the account before a request reaches image processing, then reactivate it later. Zod rejects malformed bodies at the HTTP boundary, while the small policy module keeps the lifecycle decision deterministic and easy to test.
+The one real gotcha in multitenant storefronts is that image libraries don't know your account lifecycle. Call them blindly and you'll process pictures for suspended merchants. This service keeps the decision in a small policy module and uses Zod at the HTTP edge to reject bad bodies.
 
 ## Run the workflow
 
-Use Node 22 or newer, then install dependencies and start the service:
+Spin up the service first:
 
 ```bash
 npm install
@@ -14,7 +14,7 @@ export INFRAI_API_KEY="your-key"
 npm run dev
 ```
 
-Complete onboarding:
+Node 22 or newer is required. With that running, onboard a tenant:
 
 ```bash
 curl -sS http://localhost:3000/tenants/onboard \
@@ -22,7 +22,7 @@ curl -sS http://localhost:3000/tenants/onboard \
   -d '{"tenantId":"acme"}'
 ```
 
-Generate the responsive set from an image that your upload pipeline has made accessible:
+Now generate the responsive set from an image your upload pipeline already exposed:
 
 ```bash
 curl -sS http://localhost:3000/uploads/thumbnails \
@@ -30,26 +30,26 @@ curl -sS http://localhost:3000/uploads/thumbnails \
   -d '{"tenantId":"acme","uploadId":"hero-2026-08","image":"https://images.example.com/hero.png"}'
 ```
 
-The expected result has `status: "ready"` and three entries whose widths are `320`, `640`, and `1280`. Each write uses the same tenant ID, upload ID, and width to derive its idempotency key, which makes a rate-limit retry refer to the same operation.
+You get three WebP files at 16:9. The result contains `status: "ready"` and three entries with widths `320`, `640`, and `1280`. Each write uses tenant ID, upload ID, and width to build the idempotency key, so a rate-limit retry hits the same operation.
 
-To exercise the lifecycle decision without an API call, run:
+To test the lifecycle logic without HTTP, run:
 
 ```bash
 npm test
 ```
 
-The focused test supplies three tenant states and expects only `{ accountStatus: "active", onboardingStatus: "complete" }` to permit generation. Run `npm run typecheck` for the request and response types.
+That test feeds three tenant states and expects only `{ accountStatus: "active", onboardingStatus: "complete" }` to allow generation. Check `npm run typecheck` for the request and response shapes.
 
 ## Why the boundary sits here
 
-Sharp puts resizing inside the application's CPU and deployment model; Imgix commonly moves transformation choices into delivery URLs. This service instead owns one explicit thumbnail policy and sends plain REST requests to Infrai, which keeps product rules such as onboarding and suspension beside the account model while the image operation stays behind a small typed function.
+In our storefront, Sharp would tie resizing to our CPU and deploy model; Imgix moves transforms into delivery URLs. Instead we own one thumbnail policy and send plain REST requests to Infrai. That keeps onboarding and suspension next to the account model, while the image call stays a small typed function.
 
-The client parses the Infrai envelope before interpreting the HTTP status and returns ordinary request rejections to the caller as client responses. It also backs off on rate limits and surfaces the provider's structured message rather than replacing it with a generic status string.
+The client parses the Infrai envelope before reading HTTP status and returns normal request rejections as client responses. On rate limits it backs off and shows the provider's structured message instead of a vague status string.
 
 ## Cut over without changing the product contract
 
-1. Keep the existing upload event's `tenantId`, stable `uploadId`, and accessible image URL; those three values are the new service input.
-2. Run this service beside the incumbent processor and compare the three output dimensions, WebP format, and 16:9 crop on a representative image set.
+1. Keep the upload event's `tenantId`, stable `uploadId`, and accessible image URL; those three values are the new service input.
+2. Run this service next to your current processor and compare the three output dimensions, WebP format, and 16:9 crop on a representative image set.
 3. Point the upload consumer at `/uploads/thumbnails`, then verify stored results and the `ready` response in application logs.
 4. Exercise admin suspension and reactivation before enabling the route for all tenants.
 5. Retire the Sharp worker or Imgix transformation builder after the comparison window and queue drain are complete.
